@@ -131,7 +131,7 @@ function dayHeaderForOffset(baseDay, offsetDays) {
   const dt = baseDay.plus({ days: offsetDays });
   const wd = weekdayEs(dt);
   if (offsetDays === 0) return `Hoy ${wd}.`;
-  if (offsetDays === 1) return `Mañana ${wd}.`;
+  if (offsetDays === 1) return `El ${wd}.`;
   return `El ${wd}.`;
 }
 
