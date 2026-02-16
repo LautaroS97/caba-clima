@@ -36,14 +36,19 @@ function safeText(input) {
   return s.length > 240 ? s.slice(0, 240).trim() : s;
 }
 
-function buildXml(text) {
-  return xmlbuilder.create('Response').ele('Say', {}, safeText(text)).end({ pretty: true });
+function buildXmlFromSayLines(lines) {
+  const root = xmlbuilder.create('Response');
+  for (const line of lines) {
+    const t = safeText(line);
+    if (t) root.ele('Say', {}, t);
+  }
+  return root.end({ pretty: true });
 }
 
 function ensureDegradedXml() {
   const t = nowBA().toFormat('HH:mm');
   latestWeather = {
-    xml: buildXml(`Clima para Capital Federal no disponible por el momento. Actualizado ${t}.`),
+    xml: buildXmlFromSayLines([`Clima para Capital Federal no disponible por el momento.`, `Actualizado ${t}.`]),
     timestamp: Date.now(),
   };
 }
@@ -67,12 +72,6 @@ function weatherCodeToSpanish(code) {
   if (c === 95) return 'tormenta';
   if (c === 96 || c === 99) return 'tormenta con granizo';
   return '';
-}
-
-function roundNum(v) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return null;
-  return Math.round(n);
 }
 
 function pickMostFrequent(arr) {
@@ -123,6 +122,14 @@ function dayParts() {
   ];
 }
 
+function currentPartKey(dt) {
+  const h = dt.hour;
+  if (h >= 0 && h < 6) return 'madrugada';
+  if (h >= 6 && h < 12) return 'mañana';
+  if (h >= 12 && h < 18) return 'tarde';
+  return 'noche';
+}
+
 function buildSegmentsForDay(targetDateISO, hourlyTime, hourlyCode, hourlyTemp, hourlyHum) {
   const parts = dayParts();
   const out = [];
@@ -135,8 +142,7 @@ function buildSegmentsForDay(targetDateISO, hourlyTime, hourlyCode, hourlyTemp, 
     for (let i = 0; i < hourlyTime.length; i++) {
       const dt = DateTime.fromISO(String(hourlyTime[i]), { zone: 'America/Argentina/Buenos_Aires' });
       if (!dt.isValid) continue;
-      const dateISO = dt.toISODate();
-      if (dateISO !== targetDateISO) continue;
+      if (dt.toISODate() !== targetDateISO) continue;
       const h = dt.hour;
       if (h >= p.from && h < p.to) {
         codes.push(hourlyCode[i]);
@@ -163,18 +169,14 @@ function buildSegmentsForDay(targetDateISO, hourlyTime, hourlyCode, hourlyTemp, 
   return out;
 }
 
-function formatDayLine(label, segments) {
-  const segTexts = segments.map((s) => {
-    const bits = [];
-    bits.push(`${s.key}:`);
-    if (s.desc) bits.push(`${safeText(s.desc)}.`);
-    if (s.mm) bits.push(`Entre ${s.mm.min} y ${s.mm.max} grados.`);
-    if (s.hum !== null && s.hum !== undefined) bits.push(`Humedad ${s.hum} por ciento.`);
-    return bits.join(' ');
-  });
-
-  if (!segTexts.length) return '';
-  return `${label}. ${segTexts.join(' ')}`;
+function segmentToSayLine(dayLbl, seg, isActual) {
+  const bits = [];
+  const momentLabel = isActual ? `${seg.key} actual` : seg.key;
+  bits.push(`${dayLbl}. ${momentLabel}:`);
+  if (seg.desc) bits.push(`${safeText(seg.desc)}.`);
+  if (seg.mm) bits.push(`Entre ${seg.mm.min} y ${seg.mm.max} grados.`);
+  if (seg.hum !== null && seg.hum !== undefined) bits.push(`Humedad ${seg.hum} por ciento.`);
+  return bits.join(' ');
 }
 
 async function refreshFromOpenMeteo() {
@@ -192,9 +194,11 @@ async function refreshFromOpenMeteo() {
   const hHum = Array.isArray(hourly.relative_humidity_2m) ? hourly.relative_humidity_2m : [];
 
   const baseDate = nowBA().startOf('day');
-  const updatedAt = nowBA().toFormat('HH:mm');
+  const now = nowBA();
+  const nowKey = currentPartKey(now);
 
-  const dayLines = [];
+  const lines = [];
+  lines.push('Capital Federal.');
 
   for (let d = 0; d < 3; d++) {
     const label = dayLabel(d);
@@ -202,16 +206,21 @@ async function refreshFromOpenMeteo() {
 
     const dateISO = baseDate.plus({ days: d }).toISODate();
     const segments = buildSegmentsForDay(dateISO, hTime, hCode, hTemp, hHum);
-    const line = formatDayLine(label, segments);
-    if (line) dayLines.push(line);
+
+    const filtered =
+      d === 0
+        ? segments.filter((s) => dayParts().find((p) => p.key === s.key)?.from >= dayParts().find((p) => p.key === nowKey).from)
+        : segments;
+
+    for (const seg of filtered) {
+      const isActual = d === 0 && seg.key === nowKey;
+      lines.push(segmentToSayLine(label, seg, isActual));
+    }
   }
 
-  const parts = [];
-  parts.push('Capital Federal.');
-  if (dayLines.length) parts.push(dayLines.join(' '));
-  parts.push(`Actualizado ${updatedAt}.`);
+  lines.push(`Actualizado ${nowBA().toFormat('HH:mm')}.`);
 
-  latestWeather = { xml: buildXml(parts.join(' ')), timestamp: Date.now() };
+  latestWeather = { xml: buildXmlFromSayLines(lines), timestamp: Date.now() };
   return latestWeather;
 }
 
@@ -256,13 +265,17 @@ app.get('/weather/voice', async (_req, res) => {
   res.type('application/xml').send(latestWeather.xml);
 });
 
-cron.schedule('0 * * * *', async () => {
-  try {
-    await refreshWithLock();
-  } catch (_) {
-    ensureDegradedXml();
-  }
-}, { timezone: 'America/Argentina/Buenos_Aires' });
+cron.schedule(
+  '0 * * * *',
+  async () => {
+    try {
+      await refreshWithLock();
+    } catch (_) {
+      ensureDegradedXml();
+    }
+  },
+  { timezone: 'America/Argentina/Buenos_Aires' }
+);
 
 app.listen(PORT, async () => {
   try {
