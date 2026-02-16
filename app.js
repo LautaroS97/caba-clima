@@ -48,7 +48,7 @@ function buildXmlFromSayLines(lines) {
 function ensureDegradedXml() {
   const t = nowBA().toFormat('HH:mm');
   latestWeather = {
-    xml: buildXmlFromSayLines([`Clima para Capital Federal no disponible por el momento.`, `Actualizado ${t}.`]),
+    xml: buildXmlFromSayLines(['Capital Federal.', 'Clima no disponible por el momento.', `Actualizado ${t}.`]),
     timestamp: Date.now(),
   };
 }
@@ -169,16 +169,6 @@ function buildSegmentsForDay(targetDateISO, hourlyTime, hourlyCode, hourlyTemp, 
   return out;
 }
 
-function segmentToSayLine(dayLbl, seg, isActual) {
-  const bits = [];
-  const momentLabel = isActual ? `${seg.key} actual` : seg.key;
-  bits.push(`${dayLbl}. ${momentLabel}:`);
-  if (seg.desc) bits.push(`${safeText(seg.desc)}.`);
-  if (seg.mm) bits.push(`Entre ${seg.mm.min} y ${seg.mm.max} grados.`);
-  if (seg.hum !== null && seg.hum !== undefined) bits.push(`Humedad ${seg.hum} por ciento.`);
-  return bits.join(' ');
-}
-
 async function refreshFromOpenMeteo() {
   const resp = await axios.get(OPEN_METEO_URL, {
     timeout: 10_000,
@@ -197,6 +187,9 @@ async function refreshFromOpenMeteo() {
   const now = nowBA();
   const nowKey = currentPartKey(now);
 
+  const parts = dayParts();
+  const nowFrom = parts.find((p) => p.key === nowKey)?.from ?? 0;
+
   const lines = [];
   lines.push('Capital Federal.');
 
@@ -209,12 +202,23 @@ async function refreshFromOpenMeteo() {
 
     const filtered =
       d === 0
-        ? segments.filter((s) => dayParts().find((p) => p.key === s.key)?.from >= dayParts().find((p) => p.key === nowKey).from)
+        ? segments.filter((s) => (parts.find((p) => p.key === s.key)?.from ?? 0) >= nowFrom)
         : segments;
+
+    if (!filtered.length) continue;
+
+    lines.push(`${label}.`);
 
     for (const seg of filtered) {
       const isActual = d === 0 && seg.key === nowKey;
-      lines.push(segmentToSayLine(label, seg, isActual));
+      const momentLabel = isActual ? `${seg.key} actual` : seg.key;
+
+      const bits = [];
+      bits.push(`${momentLabel}:`);
+      if (seg.desc) bits.push(`${safeText(seg.desc)}.`);
+      if (seg.mm) bits.push(`Entre ${seg.mm.min} y ${seg.mm.max} grados.`);
+      if (seg.hum !== null && seg.hum !== undefined) bits.push(`Humedad ${seg.hum} por ciento.`);
+      lines.push(bits.join(' '));
     }
   }
 
