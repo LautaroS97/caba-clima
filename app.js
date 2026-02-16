@@ -106,13 +106,6 @@ function avgRounded(arr) {
   return Math.round(sum / nums.length);
 }
 
-function dayLabel(i) {
-  if (i === 0) return 'Hoy';
-  if (i === 1) return 'Mañana';
-  if (i === 2) return 'Pasado mañana';
-  return null;
-}
-
 function dayParts() {
   return [
     { key: 'madrugada', from: 0, to: 6 },
@@ -128,6 +121,18 @@ function currentPartKey(dt) {
   if (h >= 6 && h < 12) return 'mañana';
   if (h >= 12 && h < 18) return 'tarde';
   return 'noche';
+}
+
+function weekdayEs(dt) {
+  return dt.setLocale('es').toFormat('cccc').toLowerCase();
+}
+
+function dayHeaderForOffset(baseDay, offsetDays) {
+  const dt = baseDay.plus({ days: offsetDays });
+  const wd = weekdayEs(dt);
+  if (offsetDays === 0) return `Hoy ${wd}.`;
+  if (offsetDays === 1) return `Mañana ${wd}.`;
+  return `El ${wd}.`;
 }
 
 function buildSegmentsForDay(targetDateISO, hourlyTime, hourlyCode, hourlyTemp, hourlyHum) {
@@ -183,7 +188,7 @@ async function refreshFromOpenMeteo() {
   const hTemp = Array.isArray(hourly.temperature_2m) ? hourly.temperature_2m : [];
   const hHum = Array.isArray(hourly.relative_humidity_2m) ? hourly.relative_humidity_2m : [];
 
-  const baseDate = nowBA().startOf('day');
+  const baseDay = nowBA().startOf('day');
   const now = nowBA();
   const nowKey = currentPartKey(now);
 
@@ -194,10 +199,7 @@ async function refreshFromOpenMeteo() {
   lines.push('Capital Federal.');
 
   for (let d = 0; d < 3; d++) {
-    const label = dayLabel(d);
-    if (!label) continue;
-
-    const dateISO = baseDate.plus({ days: d }).toISODate();
+    const dateISO = baseDay.plus({ days: d }).toISODate();
     const segments = buildSegmentsForDay(dateISO, hTime, hCode, hTemp, hHum);
 
     const filtered =
@@ -207,7 +209,7 @@ async function refreshFromOpenMeteo() {
 
     if (!filtered.length) continue;
 
-    lines.push(`${label}.`);
+    lines.push(dayHeaderForOffset(baseDay, d));
 
     for (const seg of filtered) {
       const isActual = d === 0 && seg.key === nowKey;
