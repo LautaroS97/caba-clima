@@ -9,10 +9,19 @@ const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 8080;
-const OPENWEATHER_API_KEY = process.env.OPENWEATHER_API_KEY || null;
 
 const CABA_LAT = -34.61;
 const CABA_LON = -58.38;
+
+const CACHE_MAX_MINUTES = 65;
+
+const OPEN_METEO_URL = 'https://api.open-meteo.com/v1/forecast';
+const OPEN_METEO_PARAMS = {
+  latitude: CABA_LAT,
+  longitude: CABA_LON,
+  current: 'temperature_2m,relative_humidity_2m,apparent_temperature,is_day,weather_code',
+  timezone: 'America/Argentina/Buenos_Aires',
+};
 
 let latestWeather = { xml: null, timestamp: null };
 let refreshPromise = null;
@@ -42,62 +51,61 @@ function ensureDegradedXml(reason) {
   };
 }
 
-async function refreshFromOpenWeather() {
-  if (!OPENWEATHER_API_KEY) throw new Error('Missing OPENWEATHER_API_KEY');
+function weatherCodeToSpanish(code) {
+  const c = Number(code);
+  if (Number.isNaN(c)) return '';
+  if (c === 0) return 'cielo despejado';
+  if (c === 1) return 'mayormente despejado';
+  if (c === 2) return 'parcialmente nublado';
+  if (c === 3) return 'nublado';
+  if (c === 45 || c === 48) return 'niebla';
+  if (c === 51 || c === 53 || c === 55) return 'llovizna';
+  if (c === 56 || c === 57) return 'llovizna helada';
+  if (c === 61 || c === 63 || c === 65) return 'lluvia';
+  if (c === 66 || c === 67) return 'lluvia helada';
+  if (c === 71 || c === 73 || c === 75) return 'nieve';
+  if (c === 77) return 'granizo';
+  if (c === 80 || c === 81 || c === 82) return 'chaparrones';
+  if (c === 85 || c === 86) return 'chaparrones de nieve';
+  if (c === 95) return 'tormenta';
+  if (c === 96 || c === 99) return 'tormenta con granizo';
+  return '';
+}
 
-  const url = 'https://api.openweathermap.org/data/2.5/weather';
-  console.log('[OPENWEATHER] fetching...', { lat: CABA_LAT, lon: CABA_LON });
+async function refreshFromOpenMeteo() {
+  console.log('[OPEN-METEO] fetching...', { lat: CABA_LAT, lon: CABA_LON });
 
-  try {
-    const resp = await axios.get(url, {
-      timeout: 10_000,
-      params: {
-        lat: CABA_LAT,
-        lon: CABA_LON,
-        appid: OPENWEATHER_API_KEY,
-        units: 'metric',
-        lang: 'es',
-      },
-    });
+  const resp = await axios.get(OPEN_METEO_URL, {
+    timeout: 10_000,
+    params: OPEN_METEO_PARAMS,
+  });
 
-    const data = resp.data || {};
-    const name = safeText(data?.name || 'Capital Federal');
-    const desc = safeText(data?.weather?.[0]?.description || '');
-    const temp = data?.main?.temp;
-    const st = data?.main?.feels_like;
-    const hum = data?.main?.humidity;
+  const data = resp.data || {};
+  const current = data.current || {};
 
-    console.log('[OPENWEATHER] success', {
-      name,
-      desc,
-      temp,
-      feels_like: st,
-      humidity: hum,
-    });
+  const temp = current.temperature_2m;
+  const st = current.apparent_temperature;
+  const hum = current.relative_humidity_2m;
+  const code = current.weather_code;
+  const timeStr = current.time;
 
-    const parts = [];
-    parts.push(`${name}.`);
-    if (desc) parts.push(`${desc}.`);
-    if (temp !== null && temp !== undefined) parts.push(`Temperatura ${safeText(temp)} grados.`);
-    if (st !== null && st !== undefined) parts.push(`Sensación ${safeText(st)} grados.`);
-    if (hum !== null && hum !== undefined) parts.push(`Humedad ${safeText(hum)} por ciento.`);
-    parts.push(`Actualizado ${nowBA().toFormat('HH:mm')}.`);
+  const desc = weatherCodeToSpanish(code);
+  const sourceDt = timeStr
+    ? DateTime.fromISO(String(timeStr)).setZone('America/Argentina/Buenos_Aires')
+    : nowBA();
 
-    latestWeather = { xml: buildXml(parts.join(' ')), timestamp: Date.now() };
-    return latestWeather;
-  } catch (err) {
-    const status = err?.response?.status;
-    const body = err?.response?.data;
-    const msg = err?.message;
+  console.log('[OPEN-METEO] success', { temp, st, hum, code, time: sourceDt.toISO() });
 
-    console.error('[OPENWEATHER] failed', {
-      status: status ?? null,
-      message: msg,
-      response: body ?? null,
-    });
+  const parts = [];
+  parts.push('Capital Federal.');
+  if (desc) parts.push(`${desc}.`);
+  if (temp !== null && temp !== undefined) parts.push(`Temperatura ${safeText(temp)} grados.`);
+  if (st !== null && st !== undefined) parts.push(`Sensación ${safeText(st)} grados.`);
+  if (hum !== null && hum !== undefined) parts.push(`Humedad ${safeText(hum)} por ciento.`);
+  parts.push(`Actualizado ${sourceDt.toFormat('HH:mm')}.`);
 
-    throw err;
-  }
+  latestWeather = { xml: buildXml(parts.join(' ')), timestamp: Date.now() };
+  return latestWeather;
 }
 
 async function refreshWithLock() {
@@ -106,14 +114,21 @@ async function refreshWithLock() {
   refreshPromise = (async () => {
     try {
       console.log('[REFRESH] starting refresh');
-      const result = await refreshFromOpenWeather();
+      const result = await refreshFromOpenMeteo();
       console.log('[REFRESH] completed');
       return result;
     } catch (err) {
       const status = err?.response?.status;
       const body = err?.response?.data;
       const msg = err?.message;
-      ensureDegradedXml(status ? `OpenWeather ${status}` : msg);
+
+      console.error('[OPEN-METEO] failed', {
+        status: status ?? null,
+        message: msg,
+        response: body ?? null,
+      });
+
+      ensureDegradedXml(status ? `Open-Meteo ${status}` : msg);
       throw err;
     } finally {
       refreshPromise = null;
@@ -150,9 +165,9 @@ app.get('/weather/voice', async (_req, res) => {
   console.log('[HTTP] GET /weather/voice');
 
   const ageMin = latestWeather?.timestamp ? (Date.now() - latestWeather.timestamp) / 60000 : null;
-  console.log('[CACHE] current age minutes:', ageMin);
+  console.log('[CACHE] age minutes:', ageMin);
 
-  const shouldRefresh = !latestWeather?.xml || ageMin === null || ageMin > 65;
+  const shouldRefresh = !latestWeather?.xml || ageMin === null || ageMin > CACHE_MAX_MINUTES;
 
   if (shouldRefresh) {
     console.log('[CACHE] refresh needed, attempting...');
@@ -179,8 +194,6 @@ cron.schedule('0 * * * *', async () => {
 
 app.listen(PORT, async () => {
   console.log(`[BOOT] Listening on ${PORT}`);
-  console.log('[BOOT] OPENWEATHER_API_KEY present:', Boolean(OPENWEATHER_API_KEY));
-
   try {
     await refreshWithLock();
   } catch (err) {
