@@ -9,11 +9,10 @@ const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 8080;
-const TWILIO_WEBHOOK_URL = process.env.TWILIO_WEBHOOK_URL || null;
+const OPENWEATHER_API_KEY = process.env.OPENWEATHER_API_KEY || null;
 
-const SMN_URL = 'https://ws.smn.gob.ar/map_items/weather';
-const TARGET_KEYWORDS = ['aeroparque', 'caba', 'capital', 'buenos aires'];
-const MAX_DATA_AGE_MINUTES = 120;
+const CABA_LAT = -34.61;
+const CABA_LON = -58.38;
 
 let latestWeather = { xml: null, timestamp: null };
 let refreshPromise = null;
@@ -28,123 +27,10 @@ function safeText(input) {
 }
 
 function buildXml(text) {
-  const root = xmlbuilder.create('Response').ele('Say', {}, safeText(text)).up();
-  if (TWILIO_WEBHOOK_URL) {
-    root.ele('Redirect', { method: 'POST' }, `${TWILIO_WEBHOOK_URL}?FlowEvent=return`).up();
-  }
-  return root.end({ pretty: true });
-}
-
-function norm(v) {
-  return String(v ?? '').trim().toLowerCase();
-}
-
-function pickCabaStation(items) {
-  if (!Array.isArray(items)) return null;
-
-  const score = (rec) => {
-    const name = norm(rec?.name ?? rec?.station ?? rec?.city ?? rec?.localidad ?? '');
-    let s = 0;
-    for (const k of TARGET_KEYWORDS) if (name.includes(k)) s += 1;
-    if (name.includes('aeroparque')) s += 3;
-    return s;
-  };
-
-  let best = null;
-  let bestScore = 0;
-
-  for (const rec of items) {
-    const sc = score(rec);
-    if (sc > bestScore) {
-      bestScore = sc;
-      best = rec;
-    }
-  }
-
-  return bestScore > 0 ? best : null;
-}
-
-function parseTimestamp(rec) {
-  const candidates = [
-    rec?.updated,
-    rec?.updated_at,
-    rec?.last_update,
-    rec?.timestamp,
-    rec?.ts,
-    rec?.fecha,
-    rec?.hora,
-    rec?.time,
-    rec?.weather?.ts,
-  ].filter(Boolean);
-
-  for (const c of candidates) {
-    const s = String(c).trim();
-    const iso = DateTime.fromISO(s, { zone: 'America/Argentina/Buenos_Aires' });
-    if (iso.isValid) return iso.setZone('America/Argentina/Buenos_Aires');
-
-    const f1 = DateTime.fromFormat(s, 'dd/LL/yyyy HH:mm', { zone: 'America/Argentina/Buenos_Aires' });
-    if (f1.isValid) return f1;
-
-    const f2 = DateTime.fromFormat(s, 'dd/LL/yyyy HH:mm:ss', { zone: 'America/Argentina/Buenos_Aires' });
-    if (f2.isValid) return f2;
-
-    const f3 = DateTime.fromFormat(s, 'HH:mm', { zone: 'America/Argentina/Buenos_Aires' });
-    if (f3.isValid) {
-      const n = nowBA();
-      return n.set({ hour: f3.hour, minute: f3.minute, second: 0, millisecond: 0 });
-    }
-  }
-
-  return null;
-}
-
-function extractFields(rec) {
-  const name = safeText(rec?.name ?? rec?.station ?? rec?.city ?? rec?.localidad ?? 'Capital Federal');
-
-  const temp =
-    rec?.weather?.temp ??
-    rec?.weather?.temperature ??
-    rec?.temp ??
-    rec?.temperature ??
-    rec?.t ??
-    null;
-
-  const st =
-    rec?.weather?.st ??
-    rec?.st ??
-    rec?.sensacion ??
-    rec?.feels_like ??
-    null;
-
-  const hum =
-    rec?.weather?.humidity ??
-    rec?.humidity ??
-    rec?.humedad ??
-    null;
-
-  const desc =
-    rec?.weather?.description ??
-    rec?.weather?.weather ??
-    rec?.description ??
-    rec?.state ??
-    rec?.icon_description ??
-    null;
-
-  return { name, temp, st, hum, desc };
-}
-
-function formatSpeak(rec, sourceDt) {
-  const { name, temp, st, hum, desc } = extractFields(rec);
-  const parts = [];
-
-  parts.push(`${name}.`);
-  if (desc) parts.push(`${safeText(desc)}.`);
-  if (temp !== null && temp !== undefined && String(temp).trim() !== '') parts.push(`Temperatura ${safeText(temp)} grados.`);
-  if (st !== null && st !== undefined && String(st).trim() !== '') parts.push(`Sensación ${safeText(st)} grados.`);
-  if (hum !== null && hum !== undefined && String(hum).trim() !== '') parts.push(`Humedad ${safeText(hum)} por ciento.`);
-  parts.push(`Actualizado ${sourceDt.toFormat('HH:mm')}.`);
-
-  return parts.join(' ');
+  return xmlbuilder
+    .create('Response')
+    .ele('Say', {}, safeText(text))
+    .end({ pretty: true });
 }
 
 function ensureDegradedXml() {
@@ -156,19 +42,37 @@ function ensureDegradedXml() {
   };
 }
 
-async function refreshFromSMN() {
-  const resp = await axios.get(SMN_URL, { timeout: 10_000 });
-  const rec = pickCabaStation(resp.data);
-  if (!rec) throw new Error('No encontré estación para CABA/Aeroparque en SMN.');
+async function refreshFromOpenWeather() {
+  if (!OPENWEATHER_API_KEY) throw new Error('Missing OPENWEATHER_API_KEY');
 
-  const sourceDt = parseTimestamp(rec);
-  if (!sourceDt) throw new Error('No pude determinar el timestamp del registro SMN.');
+  const url = 'https://api.openweathermap.org/data/2.5/weather';
+  const resp = await axios.get(url, {
+    timeout: 10_000,
+    params: {
+      lat: CABA_LAT,
+      lon: CABA_LON,
+      appid: OPENWEATHER_API_KEY,
+      units: 'metric',
+      lang: 'es',
+    },
+  });
 
-  const ageMin = nowBA().diff(sourceDt, 'minutes').minutes;
-  if (ageMin > MAX_DATA_AGE_MINUTES) throw new Error(`Dato SMN viejo (${Math.round(ageMin)} min).`);
-  if (ageMin < -10) throw new Error('Timestamp SMN inválido (en el futuro).');
+  const data = resp.data || {};
+  const name = safeText(data?.name || 'Capital Federal');
+  const desc = safeText(data?.weather?.[0]?.description || '');
+  const temp = data?.main?.temp;
+  const st = data?.main?.feels_like;
+  const hum = data?.main?.humidity;
 
-  latestWeather = { xml: buildXml(formatSpeak(rec, sourceDt)), timestamp: Date.now() };
+  const parts = [];
+  parts.push(`${name}.`);
+  if (desc) parts.push(`${desc}.`);
+  if (temp !== null && temp !== undefined) parts.push(`Temperatura ${safeText(temp)} grados.`);
+  if (st !== null && st !== undefined) parts.push(`Sensación ${safeText(st)} grados.`);
+  if (hum !== null && hum !== undefined) parts.push(`Humedad ${safeText(hum)} por ciento.`);
+  parts.push(`Actualizado ${nowBA().toFormat('HH:mm')}.`);
+
+  latestWeather = { xml: buildXml(parts.join(' ')), timestamp: Date.now() };
   return latestWeather;
 }
 
@@ -177,7 +81,7 @@ async function refreshWithLock() {
 
   refreshPromise = (async () => {
     try {
-      return await refreshFromSMN();
+      return await refreshFromOpenWeather();
     } finally {
       refreshPromise = null;
     }
@@ -209,7 +113,7 @@ app.get('/weather/voice', async (_req, res) => {
   res.type('application/xml').send(latestWeather.xml);
 });
 
-cron.schedule('0 0 * * *', async () => {
+cron.schedule('0 * * * *', async () => {
   try {
     await refreshWithLock();
   } catch (_) {
