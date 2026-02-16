@@ -19,7 +19,9 @@ const OPEN_METEO_URL = 'https://api.open-meteo.com/v1/forecast';
 const OPEN_METEO_PARAMS = {
   latitude: CABA_LAT,
   longitude: CABA_LON,
-  current: 'temperature_2m,relative_humidity_2m,apparent_temperature,is_day,weather_code',
+  current: 'temperature_2m,relative_humidity_2m,apparent_temperature,weather_code',
+  daily: 'temperature_2m_max,temperature_2m_min',
+  forecast_days: 1,
   timezone: 'America/Argentina/Buenos_Aires',
 };
 
@@ -36,10 +38,7 @@ function safeText(input) {
 }
 
 function buildXml(text) {
-  return xmlbuilder
-    .create('Response')
-    .ele('Say', {}, safeText(text))
-    .end({ pretty: true });
+  return xmlbuilder.create('Response').ele('Say', {}, safeText(text)).end({ pretty: true });
 }
 
 function ensureDegradedXml(reason) {
@@ -72,6 +71,12 @@ function weatherCodeToSpanish(code) {
   return '';
 }
 
+function roundNum(v) {
+  const n = Number(v);
+  if (Number.isNaN(n)) return null;
+  return Math.round(n);
+}
+
 async function refreshFromOpenMeteo() {
   console.log('[OPEN-METEO] fetching...', { lat: CABA_LAT, lon: CABA_LON });
 
@@ -82,27 +87,37 @@ async function refreshFromOpenMeteo() {
 
   const data = resp.data || {};
   const current = data.current || {};
+  const daily = data.daily || {};
 
-  const temp = current.temperature_2m;
-  const st = current.apparent_temperature;
-  const hum = current.relative_humidity_2m;
+  const hum = roundNum(current.relative_humidity_2m);
   const code = current.weather_code;
-  const timeStr = current.time;
-
   const desc = weatherCodeToSpanish(code);
-  const sourceDt = timeStr
-    ? DateTime.fromISO(String(timeStr)).setZone('America/Argentina/Buenos_Aires')
-    : nowBA();
 
-  console.log('[OPEN-METEO] success', { temp, st, hum, code, time: sourceDt.toISO() });
+  const tMaxRaw = Array.isArray(daily.temperature_2m_max) ? daily.temperature_2m_max[0] : null;
+  const tMinRaw = Array.isArray(daily.temperature_2m_min) ? daily.temperature_2m_min[0] : null;
+
+  const tMax = roundNum(tMaxRaw);
+  const tMin = roundNum(tMinRaw);
+
+  const updatedAt = nowBA().toFormat('HH:mm');
+
+  console.log('[OPEN-METEO] success', { desc, tMax, tMin, hum, updatedAt });
 
   const parts = [];
-  parts.push('Capital Federal.');
-  if (desc) parts.push(`${desc}.`);
-  if (temp !== null && temp !== undefined) parts.push(`Temperatura ${safeText(temp)} grados.`);
-  if (st !== null && st !== undefined) parts.push(`Sensación ${safeText(st)} grados.`);
-  if (hum !== null && hum !== undefined) parts.push(`Humedad ${safeText(hum)} por ciento.`);
-  parts.push(`Actualizado ${sourceDt.toFormat('HH:mm')}.`);
+
+  if (desc) parts.push(`Se espera ${safeText(desc)} en Capital Federal.`);
+  else parts.push('Se espera un estado del tiempo variable en Capital Federal.');
+
+  if (tMax !== null && tMin !== null) {
+    parts.push(`La temperatura máxima para hoy es de ${tMax} grados y la mínima de ${tMin} grados.`);
+  } else if (tMax !== null) {
+    parts.push(`La temperatura máxima para hoy es de ${tMax} grados.`);
+  } else if (tMin !== null) {
+    parts.push(`La temperatura mínima para hoy es de ${tMin} grados.`);
+  }
+
+  if (hum !== null) parts.push(`Humedad ${hum} por ciento.`);
+  parts.push(`Actualizado ${updatedAt}.`);
 
   latestWeather = { xml: buildXml(parts.join(' ')), timestamp: Date.now() };
   return latestWeather;
