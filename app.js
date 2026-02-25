@@ -19,12 +19,12 @@ const OPEN_METEO_URL = 'https://api.open-meteo.com/v1/forecast';
 const OPEN_METEO_PARAMS = {
   latitude: CABA_LAT,
   longitude: CABA_LON,
-  hourly: 'weather_code,temperature_2m,relative_humidity_2m',
+  hourly: 'weather_code,temperature_2m',
   forecast_days: 3,
   timezone: 'America/Argentina/Buenos_Aires',
 };
 
-let latestWeather = { xml: null, timestamp: null };
+let latestWeather = { xml: null, timestamp: null, isDegraded: false };
 let refreshPromise = null;
 
 function nowBA() {
@@ -45,11 +45,14 @@ function buildXmlFromSayLines(lines) {
   return root.end({ pretty: true });
 }
 
-function ensureDegradedXml() {
+function ensureDegradedXmlIfEmpty() {
+  if (latestWeather?.xml && latestWeather.isDegraded === false) return;
+
   const t = nowBA().toFormat('HH:mm');
   latestWeather = {
     xml: buildXmlFromSayLines(['Capital Federal.', 'Clima no disponible por el momento.', `Actualizado ${t}.`]),
     timestamp: Date.now(),
+    isDegraded: true,
   };
 }
 
@@ -99,13 +102,6 @@ function minMaxRounded(arr) {
   return { min: Math.round(Math.min(...nums)), max: Math.round(Math.max(...nums)) };
 }
 
-function avgRounded(arr) {
-  const nums = arr.map(Number).filter((n) => Number.isFinite(n));
-  if (!nums.length) return null;
-  const sum = nums.reduce((a, b) => a + b, 0);
-  return Math.round(sum / nums.length);
-}
-
 function dayParts() {
   return [
     { key: 'madrugada', from: 0, to: 6 },
@@ -135,14 +131,19 @@ function dayHeaderForOffset(baseDay, offsetDays) {
   return `El ${wd}.`;
 }
 
-function buildSegmentsForDay(targetDateISO, hourlyTime, hourlyCode, hourlyTemp, hourlyHum) {
+function segmentMomentLabel(segKey, isActual) {
+  const needsLa = segKey === 'madrugada' || segKey === 'tarde' || segKey === 'noche';
+  const base = needsLa ? `en la ${segKey}` : segKey;
+  return isActual ? `${base} actual` : base;
+}
+
+function buildSegmentsForDay(targetDateISO, hourlyTime, hourlyCode, hourlyTemp) {
   const parts = dayParts();
   const out = [];
 
   for (const p of parts) {
     const codes = [];
     const temps = [];
-    const hums = [];
 
     for (let i = 0; i < hourlyTime.length; i++) {
       const dt = DateTime.fromISO(String(hourlyTime[i]), { zone: 'America/Argentina/Buenos_Aires' });
@@ -152,22 +153,19 @@ function buildSegmentsForDay(targetDateISO, hourlyTime, hourlyCode, hourlyTemp, 
       if (h >= p.from && h < p.to) {
         codes.push(hourlyCode[i]);
         temps.push(hourlyTemp[i]);
-        hums.push(hourlyHum[i]);
       }
     }
 
     const code = pickMostFrequent(codes);
     const desc = weatherCodeToSpanish(code);
     const mm = minMaxRounded(temps);
-    const hAvg = avgRounded(hums);
 
-    if (!desc && !mm && hAvg === null) continue;
+    if (!desc && !mm) continue;
 
     out.push({
       key: p.key,
       desc: desc || '',
       mm,
-      hum: hAvg,
     });
   }
 
@@ -186,7 +184,6 @@ async function refreshFromOpenMeteo() {
   const hTime = Array.isArray(hourly.time) ? hourly.time : [];
   const hCode = Array.isArray(hourly.weather_code) ? hourly.weather_code : [];
   const hTemp = Array.isArray(hourly.temperature_2m) ? hourly.temperature_2m : [];
-  const hHum = Array.isArray(hourly.relative_humidity_2m) ? hourly.relative_humidity_2m : [];
 
   const baseDay = nowBA().startOf('day');
   const now = nowBA();
@@ -200,7 +197,7 @@ async function refreshFromOpenMeteo() {
 
   for (let d = 0; d < 3; d++) {
     const dateISO = baseDay.plus({ days: d }).toISODate();
-    const segments = buildSegmentsForDay(dateISO, hTime, hCode, hTemp, hHum);
+    const segments = buildSegmentsForDay(dateISO, hTime, hCode, hTemp);
 
     const filtered =
       d === 0
@@ -213,20 +210,19 @@ async function refreshFromOpenMeteo() {
 
     for (const seg of filtered) {
       const isActual = d === 0 && seg.key === nowKey;
-      const momentLabel = isActual ? `${seg.key} actual` : seg.key;
+      const momentLabel = segmentMomentLabel(seg.key, isActual);
 
       const bits = [];
       bits.push(`${momentLabel}:`);
       if (seg.desc) bits.push(`${safeText(seg.desc)}.`);
       if (seg.mm) bits.push(`Entre ${seg.mm.min} y ${seg.mm.max} grados.`);
-      if (seg.hum !== null && seg.hum !== undefined) bits.push(`Humedad ${seg.hum} por ciento.`);
       lines.push(bits.join(' '));
     }
   }
 
   lines.push(`Actualizado ${nowBA().toFormat('HH:mm')}.`);
 
-  latestWeather = { xml: buildXmlFromSayLines(lines), timestamp: Date.now() };
+  latestWeather = { xml: buildXmlFromSayLines(lines), timestamp: Date.now(), isDegraded: false };
   return latestWeather;
 }
 
@@ -251,7 +247,7 @@ app.post('/weather/update', async (_req, res) => {
     await refreshWithLock();
     res.json({ ok: true, message: 'Weather refreshed.' });
   } catch (err) {
-    ensureDegradedXml();
+    ensureDegradedXmlIfEmpty();
     res.status(502).json({ ok: false, error: err?.message });
   }
 });
@@ -264,7 +260,7 @@ app.get('/weather/voice', async (_req, res) => {
     try {
       await refreshWithLock();
     } catch (_) {
-      ensureDegradedXml();
+      ensureDegradedXmlIfEmpty();
     }
   }
 
@@ -277,7 +273,7 @@ cron.schedule(
     try {
       await refreshWithLock();
     } catch (_) {
-      ensureDegradedXml();
+      ensureDegradedXmlIfEmpty();
     }
   },
   { timezone: 'America/Argentina/Buenos_Aires' }
@@ -287,6 +283,6 @@ app.listen(PORT, async () => {
   try {
     await refreshWithLock();
   } catch (_) {
-    ensureDegradedXml();
+    ensureDegradedXmlIfEmpty();
   }
 });
