@@ -132,7 +132,7 @@ function dayHeaderForOffset(baseDay, offsetDays) {
 }
 
 function segmentMomentLabel(segKey, isActual) {
-  const needsLa = segKey === 'madrugada' || segKey === 'tarde' || segKey === 'noche';
+  const needsLa = segKey === 'madrugada' || segKey === 'mañana' || segKey === 'tarde' || segKey === 'noche';
   const base = needsLa ? `en la ${segKey}` : segKey;
   return isActual ? `${base} actual` : base;
 }
